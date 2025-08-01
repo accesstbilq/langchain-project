@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        {% load static %}
+        <meta charset="UTF-8">
+        <title>Chat with Bot</title>
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    </head>
+    <body>
+        <div class="chat-container">
+            <div class="chat-header">
+                Chat with Bot
+            </div>
+            <div class="chat-box" id="chat-box"></div>
+            <!-- Loader shown while waiting for bot -->
+            <div id="loader" class="loader"></div>
+            <div class="chat-input">
+                <input type="text" id="user-input" placeholder="Type a message..." onkeydown="if(event.key === 'Enter') sendMessage()">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+        <script>
+            function sendMessage() {
+                const userInput = $('#user-input').val().trim();
+                //if (!userInput) return;
+
+                $('#chat-box').append('<div class="message user">You: ' + userInput + '</div>');
+                $('#user-input').val('');
+                $('#loader').show();
+
+                $.post('/get-response/', { message: userInput }, function(data) {
+                    $('#chat-box').append('<div class="message bot">Bot: ' + data.response + '</div>');
+                }).fail(function(jqXHR, textStatus, errorThrown) {
+                    $('#chat-box').append('<div class="message bot">❌ Error: ' + errorThrown + '</div>');
+                }).always(function() {
+                    $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                    $('#loader').hide();
+                });
+            }
+        </script>
+    </body>
+</html>
