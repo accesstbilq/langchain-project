@@ -47,12 +47,14 @@ body {
     background-color: #d1e8ff;
     align-self: flex-end;
     color: #333;
+    word-break: break-all;
 }
 
 .bot {
     background-color: #e1ffd4;
     align-self: flex-start;
     color: #333;
+    word-break: break-all;
 }
 
 .chat-input {

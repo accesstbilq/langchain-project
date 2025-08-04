@@ -3,7 +3,8 @@ from bs4 import BeautifulSoup
 import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-import json
+import json, os
+from dotenv import load_dotenv
 from urllib.parse import urljoin
 import time
 import concurrent.futures
@@ -20,7 +21,10 @@ from langchain_community.document_loaders.sitemap import SitemapLoader
 # Suppress the relevance score warning
 warnings.filterwarnings("ignore", message="Relevance scores must be between 0 and 1")
 
-# Replace with your actual API key
+# Load ENV file
+load_dotenv()
+
+API_KEY = os.getenv('OPEN_AI_KEY')
 
 @dataclass
 class WebPageMetadata:

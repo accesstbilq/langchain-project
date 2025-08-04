@@ -8,17 +8,26 @@
         <link rel="stylesheet" href="{% static 'css/styles.css' %}">
     </head>
     <body>
-        <div class="chat-container">
-            <div class="chat-header">
-                Chat with Bot
+        <div class="" style="display: flex;gap: 10px;">
+            <div class="metadata-comtainer" id="metadata_comtainer" style="padding: 0px;background-color: #ffffff;border-radius: 10px;    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);display: flex;flex-direction: column;overflow: hidden;">
+                <div class="chat-header">
+                    MetaData
+                </div>
+                <div class="metadata" style="padding: 10px 20px;"></div>
             </div>
-            <div class="chat-box" id="chat-box"></div>
-            <!-- Loader shown while waiting for bot -->
-            <div id="loader" class="loader"></div>
-            <div class="chat-input">
-                <input type="text" id="user-input" placeholder="Type a message..." onkeydown="if(event.key === 'Enter') sendMessage()">
-                <button onclick="sendMessage()">Send</button>
+            <div class="chat-container">
+                <div class="chat-header">
+                    Chat with Bot
+                </div>
+                <div class="chat-box" id="chat-box"></div>
+                <!-- Loader shown while waiting for bot -->
+                <div id="loader" class="loader"></div>
+                <div class="chat-input">
+                    <input type="text" id="user-input" placeholder="Type a message..." onkeydown="if(event.key === 'Enter') sendMessage()">
+                    <button onclick="sendMessage()">Send</button>
+                </div>
             </div>
+            
         </div>
         <script>
             function sendMessage() {
@@ -30,7 +39,21 @@
                 $('#loader').show();
 
                 $.post('/get-response/', { message: userInput }, function(data) {
-                    $('#chat-box').append('<div class="message bot">Bot: ' + data.response + '</div>');
+                    let originalText = data.response;
+                    let formattedText = originalText.replace(/\n/g, "<br/>");
+                    $('#chat-box').append('<div class="message bot">Bot: ' + formattedText + '</div>');
+                    
+                    
+                                       
+                    if(data.response_meta.source=='tool_agent'){
+                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Tool Used: '+data.response_meta.tool_used+'</p>');
+                    }else{
+                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Source Documents: '+data.response_meta.source_documents+'</p>');
+                    }
+
+                    
+
+
                 }).fail(function(jqXHR, textStatus, errorThrown) {
                     $('#chat-box').append('<div class="message bot">❌ Error: ' + errorThrown + '</div>');
                 }).always(function() {
