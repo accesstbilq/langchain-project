@@ -21,8 +21,10 @@ from langchain.agents import initialize_agent, AgentType
 import re
 from django.views.decorators.csrf import csrf_exempt
 
+# Global variables for chat system and messages
 chat_system = None
 messages = []
+current_vectorstore_url = None  # Track which URL the vectorstore was created for
 
 # ------------------- Configuration -------------------
 
@@ -34,7 +36,6 @@ OPENAIKEY = os.getenv('OPEN_AI_KEY')
 
 # ------------------- Tools -------------------
 
-# Define custom tools using LangChain's @tool decorator
 @tool("validate_and_fetch_url", return_direct=True)
 def validate_and_fetch_url(url: str) -> str:
     """Validate a URL and fetch its title if valid."""
@@ -92,7 +93,7 @@ def web_scraper_tool(input_str: str) -> str:
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
             if len(text) > 2000:
-                text = text
+                text = text[:2000] + "..."
             result += f"📄 **Text Content:**\n{text}"
 
         elif element_type == "headings":
@@ -145,117 +146,224 @@ def web_scraper_tool(input_str: str) -> str:
         return f"⚠️ Failed to scrape the webpage.\nError: {str(e)}"
     except Exception as e:
         return f"❌ An error occurred during scraping.\nError: {str(e)}"
-    
-# ------------------- Views -------------------
 
+# ------------------- Helper Functions -------------------
+
+def extract_url_from_message(message: str) -> str:
+    """Extract URL from user message"""
+    # Look for URLs in the message
+    url_pattern = r'https?://[^\s<>"{}|\\^`[\]]+'
+    urls = re.findall(url_pattern, message)
+    
+    # Return the first valid URL found
+    for url in urls:
+        if validators.url(url):
+            return url
+    
+    return None
+
+def create_default_chat_response(user_message: str) -> str:
+    """Create a response using basic OpenAI chat without RAG"""
+    try:
+        llm = ChatOpenAI(temperature=0.7, openai_api_key=OPENAIKEY, model="gpt-3.5-turbo")
+        
+        # Create a simple conversation
+        system_message = """You are an expert SEO assistant that can use tools to help with search engine optimization tasks. 
+        
+Your expertise includes:
+- Keyword research and analysis
+- Content optimization strategies
+- Technical SEO recommendations
+- Meta tag optimization
+- Link building strategies
+- SEO auditing and reporting
+- Search ranking analysis
+- Competitor analysis
+
+You should provide actionable, data-driven SEO advice and use available tools when they can help gather information or perform specific SEO-related tasks. Always explain your recommendations clearly and provide practical implementation steps."""
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_message),
+            ("human", "{input}")
+        ])
+        
+        chain = prompt | llm
+        response = chain.invoke({"input": user_message})
+        
+        return response.content
+        
+    except Exception as e:
+        print(f"Error in default chat: {e}")
+        return "I'm sorry, I encountered an error processing your request. Please try again."
+
+# ------------------- Views -------------------
 
 def chatbot_view(request):
     return render(request, 'chatbot/chat.html')
 
-# Enhanced view specifically for URL validation
-
 @csrf_exempt
 def validate_url_view(request):
-    """Dedicated view for URL validation"""
+    """Enhanced chatbot view that handles URL processing, tools, RAG, and default chat"""
+    global chat_system, messages, current_vectorstore_url
+    
     if request.method == 'POST':
         try:
             usermessage = request.POST.get('message', '').strip()
             
+            # Add user message to conversation history
             messages.append({"role": "user", "content": usermessage})
 
-            url_input = "https://www.brihaspatitech.com/ecommerce-development-company/"    
+            # Step 1: Check if message contains a URL or is URL-related
+            extracted_url = extract_url_from_message(usermessage)
 
-            vectorizer = MultiURLVectorizer(
-                urls=[url_input],
-                embedding_model="openai",
-                chunk_size=1000,
-                delay_between_requests=0.5
-            )
-            summary = vectorizer.process(parallel=False)
+
+            print('extracted_url ********************** ',extracted_url)
             
-            if summary["successful_urls"]:
-                # Initialize chat system
-                chat_system = EnhancedWebContentChat(vectorizer)
+            # Step 2: If URL is found, process it and create/update vectorstore
+            if extracted_url:
+                print(f"URL detected: {extracted_url}")
                 
-                # Display summary
-                url_summary = summary["processing_details"][url_input]
-                
-                tool_response = chat_system.get_tool_response(usermessage)
-                
-
-                if tool_response['success']:
-                    assistant_message = {
-                        "role": "assistant", 
-                        "content": tool_response["answer"],
-                        "sources": tool_response.get("sources", "")  # Add sources from tool response
-                    }
-                    messages.append(assistant_message)
+                # Check if we need to create a new vectorstore for this URL
+                if current_vectorstore_url != extracted_url:
+                    print(f"Creating new vectorstore for URL: {extracted_url}")
                     
-                    if tool_response['tool_used'] =='unknown':
-                        chat_system.memory_manager.memory.output_key = "answer"
-                        response = chat_system.get_response(usermessage)
+                    try:
+                        # Create new vectorizer for the URL
+                        vectorizer = MultiURLVectorizer(
+                            urls=[extracted_url],
+                            embedding_model="openai",
+                            chunk_size=1000,
+                            delay_between_requests=0.5
+                        )
                         
-                        assistant_message = {
-                            "role": "assistant", 
-                            "content": response["answer"],
-                            "sources": response.get("source_documents", "")
-                        }
-                        messages.append(assistant_message)
-
+                        summary = vectorizer.process(parallel=False)
+                        
+                        if summary["successful_urls"]:
+                            # Create new chat system with this vectorstore
+                            chat_system = EnhancedWebContentChat(vectorizer)
+                            current_vectorstore_url = extracted_url
+                            
+                            # Provide initial analysis of the URL
+                            url_info = f"✅ Successfully processed and analyzed: {extracted_url}\n\n"
+                            url_info += f"📊 Processing Summary:\n"
+                            url_info += f"- Documents created: {summary.get('total_documents_created', 0)}\n"
+                            url_info += f"- Content analyzed: ✓\n\n"
+                            url_info += "🤖 I'm now ready to answer questions about this website's content. What would you like to know?"
+                            
+                            messages.append({"role": "assistant", "content": url_info})
+                            
+                            return JsonResponse({
+                                'success': True,
+                                'response': url_info,
+                                'response_meta': {
+                                    'source': 'url_processing',
+                                    'url_processed': extracted_url,
+                                    'documents_created': summary.get('total_documents_created', 0),
+                                    'response_type': 'vectorstore_created'
+                                }
+                            })
+                        else:
+                            error_msg = f"❌ Failed to process the URL: {extracted_url}"
+                            messages.append({"role": "assistant", "content": error_msg})
+                            
+                            return JsonResponse({
+                                'success': False,
+                                'response': error_msg,
+                                'response_meta': {
+                                    'source': 'error',
+                                    'error_type': 'url_processing_failed',
+                                    'url': extracted_url
+                                }
+                            })
+                            
+                    except Exception as e:
+                        error_msg = f"❌ Error processing URL {extracted_url}: {str(e)}"
+                        messages.append({"role": "assistant", "content": error_msg})
+                        
                         return JsonResponse({
-                            'success': True,
-                            'response': response["answer"],
+                            'success': False,
+                            'response': error_msg,
                             'response_meta': {
-                                'source': 'rag_chain',
-                                'source_documents': len(response.get("source_documents", [])),
-                                'url_processed': url_input,
-                                'response_type': 'rag_response'
+                                'source': 'error',
+                                'error_type': 'url_processing_exception',
+                                'url': extracted_url,
+                                'error_message': str(e)
                             }
                         })
 
-                    # Fixed: Include proper response_meta for tool responses
+            # Step 3: If we have a chat system (URL was processed), use it
+            if chat_system is not None:
+                print("Using enhanced chat system with vectorstore...")
+                
+                # Try tool response first
+                tool_response = chat_system.get_tool_response(usermessage)
+                
+                if tool_response['success'] and tool_response['tool_used'] != 'unknown':
+                    assistant_message = {
+                        "role": "assistant", 
+                        "content": tool_response["answer"],
+                        "sources": tool_response.get("sources", "")
+                    }
+                    messages.append(assistant_message)
+                    
                     return JsonResponse({
                         'success': True,
                         'response': tool_response["answer"],
                         'response_meta': {
                             'source': 'tool_agent',
-                            'tool_used': tool_response['tool_used'],  # Or detect which tool was used
-                            'url_processed': url_input,
-                            'response_type': 'direct_tool_response'
+                            'tool_used': tool_response['tool_used'],
+                            'url_processed': current_vectorstore_url,
+                            'response_type': 'tool_response'
                         }
                     })
-                else:
+                
+                # Use RAG system if no tool was used
+                print("Using RAG system...")
+                
+                if hasattr(chat_system.memory_manager.memory, 'output_key'):
                     chat_system.memory_manager.memory.output_key = "answer"
-                    response = chat_system.get_response(usermessage)
-                    
+                
+                rag_response = chat_system.get_response(usermessage)
+                
+                if rag_response['success']:
                     assistant_message = {
                         "role": "assistant", 
-                        "content": response["answer"],
-                        "sources": response.get("source_documents", "")
+                        "content": rag_response["answer"],
+                        "sources": rag_response.get("source_documents", "")
                     }
                     messages.append(assistant_message)
 
                     return JsonResponse({
                         'success': True,
-                        'response': response["answer"],
+                        'response': rag_response["answer"],
                         'response_meta': {
                             'source': 'rag_chain',
-                            'source_documents': len(response.get("source_documents", [])),
-                            'url_processed': url_input,
+                            'source_documents': len(rag_response.get("source_documents", [])),
+                            'url_processed': current_vectorstore_url,
                             'response_type': 'rag_response'
                         }
                     })
 
-            else:
-                return JsonResponse({
-                    'success': False,
-                    'response': '❌ Failed to process the URL.',
-                    'processing_details': summary["processing_details"][url_input],
-                    'response_meta': {
-                        'source': 'error',
-                        'error_type': 'url_processing_failed'
-                    }
-                })
+            # Step 4: If no vectorstore and not URL-related, use default chat
+            print("Using default chat mode...")
+            
+            default_response = create_default_chat_response(usermessage)
+            
+            assistant_message = {
+                "role": "assistant", 
+                "content": default_response
+            }
+            messages.append(assistant_message)
+            
+            return JsonResponse({
+                'success': True,
+                'response': default_response,
+                'response_meta': {
+                    'source': 'default_chat',
+                    'response_type': 'general_conversation',
+                    'has_vectorstore': chat_system is not None
+                }
+            })
                 
         except json.JSONDecodeError:
             return JsonResponse({
@@ -268,9 +376,12 @@ def validate_url_view(request):
             })
 
         except Exception as e:
+            print(f"Exception in validate_url_view: {e}")
+            print(f"Full traceback: {traceback.format_exc()}")
+            
             return JsonResponse({
                 'success': False,
-                'response': f'Error validating URL: {str(e)}',
+                'response': f'Error processing request: {str(e)}',
                 'response_meta': {
                     'source': 'error',
                     'error_type': 'general_exception',
@@ -288,7 +399,8 @@ def validate_url_view(request):
     })
 
 
-# Your existing classes remain the same
+# ------------------- Enhanced Classes (Keep existing classes unchanged) -------------------
+
 class ChatMemoryManager:
     """Manages chat history and memory for conversational interactions"""
     
@@ -302,7 +414,7 @@ class ChatMemoryManager:
             retriever=retriever,
             memory_key="chat_history",
             return_messages=True,
-            output_key="answer",
+            output_key="answer",  # Default to "answer"
             llm=ChatOpenAI(temperature=0, openai_api_key=OPENAIKEY),
             max_token_limit=window_token_limit,
         )
@@ -321,14 +433,18 @@ class ChatMemoryManager:
     
     def add_message(self, human_input: str, ai_response: str):
         """Add a conversation pair to memory"""
-        self.memory.save_context(
-            {"input": human_input},
-            {"answer": ai_response}
-        )
+        try:
+            self.memory.save_context(
+                {"input": human_input},
+                {self.memory.output_key: ai_response}
+            )
+        except Exception as e:
+            print(f"Error saving to memory: {e}")
     
     def clear_memory(self):
         """Clear the conversation memory"""
         self.memory.clear()
+
 
 class EnhancedWebContentChat:
     """Enhanced web content chat with memory and context awareness"""
@@ -339,22 +455,29 @@ class EnhancedWebContentChat:
         if vectorizer and vectorizer.vectorstore:
             self.memory_manager = ChatMemoryManager(vectorstore=vectorizer.vectorstore)
         
-        self.system_prompt = """You are a helpful AI assistant that answers questions based on web content that has been processed and stored in a vector database. 
+        self.system_prompt = f"""You are an expert SEO assistant and web content analyzer. You answer questions based on web content that has been processed and stored in a vector database.
 
 Context about the processed content:
-- The content comes from web pages that have been parsed and chunked
-- You have access to metadata including titles, headings, FAQs, and main content
-- Each piece of content has source URL information
+- The content is sourced from live webpages (HTML parsed and chunked)
+- Each chunk may include metadata such as <title>, <meta description>, <h1>, FAQ, structured data, or keyword-dense paragraphs
+- The data has been embedded and stored for semantic search
+
+Your expertise includes:
+- SEO analysis: title tags, meta descriptions, headings (H1/H2), content quality, keyword usage, internal linking, and crawlability
+- Content analysis: readability, user intent, content gaps, and optimization opportunities
+- Technical SEO: page structure, schema markup, and HTML optimization
+- General web content questions and recommendations
 
 Instructions:
-- Always provide accurate information based on the retrieved content
-- When referencing information, mention the source URL when relevant
-- If you don't have enough information to answer a question, say so clearly
-- Maintain context from previous conversations
-- Be conversational and helpful
-- If asked about previous conversations, refer to the chat history appropriately
+- Always provide helpful, accurate responses based on the available context
+- When discussing SEO elements, mention the source URL when referring to extracted data
+- If asked to improve SEO, provide actionable suggestions based on best practices
+- For general questions, use your knowledge combined with the context from the processed content
+- If the context doesn't provide a specific answer, clearly state what information is available and provide general guidance
+- Be conversational, helpful, and avoid being overly technical unless requested
+- Always aim to be constructive and solution-oriented
 
-Current time: {current_time}
+Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
 
         self.contextualize_q_system_prompt = """Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is."""
@@ -368,7 +491,7 @@ Current time: {current_time}
         self.qa_prompt = ChatPromptTemplate.from_messages([
             ("system", self.system_prompt),
             MessagesPlaceholder("chat_history"),
-            ("human", "Based on the following context, please answer my question:\n\nContext: {context}\n\nQuestion: {input}")
+            ("human", "Based on the following context and your knowledge, please answer my question:\n\nContext: {context}\n\nQuestion: {input}")
         ])
 
     def setup_retrieval_chain(self):
@@ -381,7 +504,7 @@ Current time: {current_time}
         
         retriever = self.vectorizer.vectorstore.as_retriever(
             search_type="mmr",
-            search_kwargs={"k": 1, "fetch_k": 8}
+            search_kwargs={"k": 3, "fetch_k": 10}  # Increased for better context
         )
         
         history_aware_retriever = create_history_aware_retriever(
@@ -405,45 +528,43 @@ Current time: {current_time}
         if not self.memory_manager:
             raise ValueError("Memory manager not initialized")
 
-        tools = [validate_and_fetch_url,web_scraper_tool]
+        tools = [validate_and_fetch_url, web_scraper_tool]
 
-        # Option 1: Fix the memory configuration
-        print(f"DEBUG: Current memory type: {type(self.memory_manager.memory)}")
-        
-        # Check if memory has output_key attribute and fix it
-        if hasattr(self.memory_manager.memory, 'output_key'):
-            print(f"DEBUG: Current memory output_key: {self.memory_manager.memory.output_key}")
-            # Change the memory's output_key to match what the agent produces
-            self.memory_manager.memory.output_key = "output"
-            print(f"DEBUG: Changed memory output_key to: {self.memory_manager.memory.output_key}")
-        
-        # Option 2: If the above doesn't work, create agent without memory and handle it manually
+        # Set correct output key for tool agent
         try:
+            # Create a copy of memory with correct output key for tools
+            tool_memory = ConversationVectorStoreTokenBufferMemory(
+                retriever=self.memory_manager.memory.retriever,
+                memory_key="chat_history",
+                return_messages=True,
+                output_key="output",  # Tools typically use "output"
+                llm=self.memory_manager.llm,
+                max_token_limit=1000,
+            )
+            
             self.tool_agent = initialize_agent(
                 tools=tools,
                 llm=self.memory_manager.llm,
                 agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-                memory=self.memory_manager.memory,
+                memory=tool_memory,
                 verbose=True,
                 return_direct=False,
             )
-            print("DEBUG: Agent created successfully with memory")
             self.use_manual_memory = False
+            print("DEBUG: Agent created successfully with dedicated memory")
             
         except Exception as e:
             print(f"DEBUG: Failed to create agent with memory: {e}")
-            print("DEBUG: Creating agent without memory and will handle memory manually")
-            
+            # Fallback to agent without memory
             self.tool_agent = initialize_agent(
                 tools=tools,
                 llm=self.memory_manager.llm,
                 agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
                 verbose=True,
                 return_direct=False,
-                # No memory - we'll handle it manually
             )
             self.use_manual_memory = True
-            print("DEBUG: Agent created without memory")
+            print("DEBUG: Agent created without memory, will handle manually")
 
     def get_tool_response(self, user_input: str) -> Dict[str, Any]:
         """Get response using tool agent with memory"""
@@ -451,28 +572,26 @@ Current time: {current_time}
             if not hasattr(self, 'tool_agent'):
                 self.setup_tool_agent()
 
-            print(f"DEBUG: About to invoke agent with input: {user_input}")
-            # Detect which tool might be used based on input
+            # Detect which tool might be used
             tool_used = self._detect_tool_from_input(user_input)
-            print("*" * 60)
-            print('tool_used',tool_used)
-            print("*" * 60)
-            # The key fix: wrap the input in the correct format for the agent
-            if isinstance(user_input, str):
-                formatted_input = {"input": user_input}
-            else:
-                formatted_input = user_input
+            
+            # Only proceed with tool if a specific tool is detected
+            if tool_used == 'unknown':
+                return {
+                    "answer": "",
+                    "success": True,
+                    "sources": "",
+                    "tool_used": "unknown",
+                    "metadata": {"tool_detection": "no_specific_tool_detected"}
+                }
+
+            # Format input for agent
+            formatted_input = {"input": user_input} if isinstance(user_input, str) else user_input
                 
             result = self.tool_agent.invoke(formatted_input)
             
-            print("DEBUG: Raw result from agent:")
-            #print('nidshihdshkds', result)
-            #print(f"DEBUG: Result type: {type(result)}")
-            
-            # Handle the response based on what the agent returns
+            # Extract response text
             if isinstance(result, dict):
-                print(f"DEBUG: Result keys: {list(result.keys())}")
-                # Extract the response text from various possible keys
                 response_text = (
                     result.get("output") or 
                     result.get("answer") or 
@@ -482,157 +601,112 @@ Current time: {current_time}
             else:
                 response_text = str(result)
             
-            print(f"DEBUG: Extracted response_text: {response_text}")
-            
-            # Handle manual memory saving if needed
+            # Handle manual memory if needed
             if hasattr(self, 'use_manual_memory') and self.use_manual_memory:
                 try:
-                    # Try to save with the key your memory expects
-                    if hasattr(self.memory_manager.memory, 'output_key'):
-                        expected_key = self.memory_manager.memory.output_key
-                    else:
-                        expected_key = "answer"  # fallback to your original key
-                        
-                    self.memory_manager.memory.save_context(
-                        {"input": user_input}, 
-                        {expected_key: response_text}
-                    )
-                    print(f"DEBUG: Manually saved to memory with key: {expected_key}")
+                    self.memory_manager.add_message(user_input, response_text)
                 except Exception as memory_error:
                     print(f"DEBUG: Manual memory save failed: {memory_error}")
             
-            # Enhanced response with metadata
-            print("*" * 60)
-            print('tool_used',tool_used)
-            print("*" * 60)
-
-            final_result = {
+            return {
                 "answer": response_text,
                 "success": True,
                 "sources": self._extract_sources_from_response(response_text),
                 "tool_used": tool_used,
-                "agent_result": result,  # Include full agent result for debugging
                 "metadata": {
                     "response_length": len(response_text),
                     "tool_detected": tool_used,
-                    "memory_type": "manual" if hasattr(self, 'use_manual_memory') and self.use_manual_memory else "automatic"
+                    "memory_handling": "manual" if hasattr(self, 'use_manual_memory') and self.use_manual_memory else "automatic"
                 }
             }
-            
-            #print(f"DEBUG: Returning final result: {final_result}")
-            return final_result
 
         except Exception as e:
-            print(f"Exception occurred: {e}")
-            print(f"Exception type: {type(e)}")
-            print(f"Full traceback: {traceback.format_exc()}")
-            
+            print(f"Tool agent error: {e}")
             return {
                 "answer": f"Tool error: {str(e)}",
                 "success": False,
                 "error": str(e),
                 "sources": "",
                 "tool_used": "unknown",
-                "metadata": {
-                    "error_type": type(e).__name__,
-                    "error_occurred": True
-                }
+                "metadata": {"error_type": type(e).__name__}
             }
 
     def _extract_sources_from_response(self, response_text: str) -> str:
         """Extract source URLs or references from response text"""
-        
-        # Look for URLs in the response
         url_pattern = r'https?://[^\s<>"{}|\\^`[\]]+'
         urls = re.findall(url_pattern, response_text)
         
         if urls:
             return ", ".join(urls)
         
-        # Look for other source indicators
         if "✅" in response_text and "URL is valid" in response_text:
             return "URL validation tool"
         elif "🌐 Web Scraping Results" in response_text:
             return "Web scraping tool"
         
         return ""
+
     def _detect_tool_from_input(self, user_input: str) -> str:
         """Detect which tool might be used based on user input"""
         input_lower = user_input.lower()
-        print('Bansal',input_lower)
-        if any(keyword in input_lower for keyword in ['valid', 'validate', 'check url', 'url valid']):
+        
+        # More specific patterns for tool detection
+        validation_keywords = ['validate url', 'check url', 'url valid', 'verify url', 'test url']
+        scraping_keywords = ['scrape', 'extract content', 'get content', 'fetch content', 'scrape website']
+        
+        if any(keyword in input_lower for keyword in validation_keywords):
             return "validate_and_fetch_url"
-        elif any(keyword in input_lower for keyword in ['scrape', 'extract', 'content', 'text', 'headings']):
+        elif any(keyword in input_lower for keyword in scraping_keywords):
             return "web_scraper_tool"
         else:
             return "unknown"
 
-
     def get_response(self, user_input: str) -> Dict[str, Any]:
-        """Get response with memory context"""
+        """Get response with memory context using RAG"""
         try:
             if not hasattr(self, 'rag_chain'):
                 self.setup_retrieval_chain()
             
+            # Get chat history for context
             chat_history = []
             if self.memory_manager and hasattr(self.memory_manager.memory, 'chat_memory'):
                 chat_history = self.memory_manager.memory.chat_memory.messages
             
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            formatted_system_prompt = self.system_prompt.format(current_time=current_time)
-            
-            qa_prompt_with_time = ChatPromptTemplate.from_messages([
-                ("system", formatted_system_prompt),
-                MessagesPlaceholder("chat_history"),
-                ("human", "Based on the following context, please answer my question:\n\nContext: {context}\n\nQuestion: {input}")
-            ])
-            
-            question_answer_chain = create_stuff_documents_chain(
-                self.memory_manager.llm,
-                qa_prompt_with_time
-            )
-            
-            retriever = self.vectorizer.vectorstore.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": 1, "fetch_k": 8}
-            )
-            
-            history_aware_retriever = create_history_aware_retriever(
-                self.memory_manager.llm,
-                retriever,
-                self.contextualize_q_prompt
-            )
-            
-            updated_rag_chain = create_retrieval_chain(
-                history_aware_retriever,
-                question_answer_chain
-            )
-            
-            response = updated_rag_chain.invoke({
+            # Invoke the RAG chain
+            response = self.rag_chain.invoke({
                 "input": user_input,
                 "chat_history": chat_history
             })
             
+            # Save to memory
             if self.memory_manager:
                 self.memory_manager.add_message(user_input, response["answer"])
-
-
-            print('Nishant ----- ', response)
             
             return {
                 "answer": response["answer"],
                 "source_documents": response.get("context", []),
-                "success": True
+                "success": True,
+                "metadata": {
+                    "context_docs_used": len(response.get("context", [])),
+                    "response_type": "rag_with_memory"
+                }
             }
             
         except Exception as e:
-            error_message = f"Sorry, I encountered an error: {str(e)}"
+            print(f"RAG system error: {e}")
+            error_message = f"I encountered an error processing your question: {str(e)}"
+            
+            # Still try to save error to memory
             if self.memory_manager:
-                self.memory_manager.add_message(user_input, error_message)
+                try:
+                    self.memory_manager.add_message(user_input, error_message)
+                except:
+                    pass
+                    
             return {
                 "answer": error_message,
                 "source_documents": [],
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "metadata": {"error_type": type(e).__name__}
             }
