@@ -402,7 +402,7 @@ def validate_url_view(request):
                             url_info += "🤖 I'm now ready to answer questions about this website's content. What would you like to know?"
 
                             # Save this initial interaction
-                            chat_system.memory_manager.save_message_pair(usermessage, url_info)
+                            message_id = chat_system.memory_manager.save_message_pair(usermessage, url_info)
 
                             messages.append({"role": "assistant", "content": url_info})
                             
@@ -410,6 +410,7 @@ def validate_url_view(request):
                                 'success': True,
                                 'response': url_info,
                                 'session_id': session_id,
+                                'message_id': message_id,
                                 'response_meta': {
                                     'source': 'url_processing',
                                     'url_processed': extracted_url,
@@ -465,11 +466,12 @@ def validate_url_view(request):
                     # Save this initial interaction
 
 
-                    chat_system.memory_manager.save_message_pair(usermessage, tool_response["answer"])
+                    message_id = chat_system.memory_manager.save_message_pair(usermessage, tool_response["answer"])
                     return JsonResponse({
                         'success': True,
                         'response': tool_response["answer"],
                         'session_id': session_id,
+                        'message_id': message_id,
                         'response_meta': {
                             'source': 'tool_agent',
                             'tool_used': tool_response['tool_used'],
@@ -490,13 +492,14 @@ def validate_url_view(request):
             # Save this initial interaction
             #chat_system.memory_manager.save_message_pair(usermessage, default_response)
             if chat_system and hasattr(chat_system, 'memory_manager') and chat_system.memory_manager:
-                chat_system.memory_manager.save_message_pair(usermessage, default_response)
+                message_id = chat_system.memory_manager.save_message_pair(usermessage, default_response)
             messages.append(assistant_message)
             
             return JsonResponse({
                 'success': True,
                 'response': default_response,
                 'session_id': session_id,
+                'message_id': message_id,
                 'response_meta': {
                     'source': 'default_chat',
                     'response_type': 'general_conversation',

@@ -46,9 +46,9 @@
                     
                                        
                     if(data.response_meta.source=='tool_agent'){
-                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Tool Used: '+data.response_meta.tool_used+'</p>');
+                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Tool Used: '+data.response_meta.tool_used+'</p><p>Message ID: '+data.message_id+'</p><p>Session ID: '+data.session_id+'</p>');
                     }else{
-                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p>');
+                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Message ID: '+data.message_id+'</p><p>Session ID: '+data.session_id+'</p>');
                     }
 
                     
