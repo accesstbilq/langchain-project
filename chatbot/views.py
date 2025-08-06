@@ -6,7 +6,7 @@ import validators
 import requests, traceback
 from bs4 import BeautifulSoup
 from langchain.memory import ConversationVectorStoreTokenBufferMemory
-from langchain.schema import HumanMessage, SystemMessage, AIMessage
+from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -20,11 +20,19 @@ from dotenv import load_dotenv
 from langchain.agents import initialize_agent, AgentType
 import re
 from django.views.decorators.csrf import csrf_exempt
+import uuid
+import hashlib
+
+# Chroma DB imports for chat history
+from langchain_community.vectorstores import Chroma
+from langchain_openai.embeddings import OpenAIEmbeddings
+from langchain.schema import Document
 
 # Global variables for chat system and messages
 chat_system = None
 messages = []
 current_vectorstore_url = None  # Track which URL the vectorstore was created for
+current_session_id = None  # Track user session
 
 # ------------------- Configuration -------------------
 
@@ -196,20 +204,159 @@ You should provide actionable, data-driven SEO advice and use available tools wh
         print(f"Error in default chat: {e}")
         return "I'm sorry, I encountered an error processing your request. Please try again."
 
+def get_or_create_session_id(request):
+    """Get or create session ID for user"""
+    session_id = request.session.get('chat_session_id')
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        request.session['chat_session_id'] = session_id
+    return session_id
+
 # ------------------- Views -------------------
 
 def chatbot_view(request):
     return render(request, 'chatbot/chat.html')
 
+@csrf_exempt 
+def get_chat_history_view(request):
+    """API endpoint to get chat history for current session"""
+    global chat_system
+    
+    if request.method == 'GET':
+        try:
+            session_id = get_or_create_session_id(request)
+            limit = int(request.GET.get('limit', 50))
+            
+            if chat_system and hasattr(chat_system, 'get_chat_history'):
+                history = chat_system.get_chat_history(limit)
+                return JsonResponse({
+                    'success': True,
+                    'chat_history': history,
+                    'session_id': session_id,
+                    'total_messages': len(history)
+                })
+            else:
+                return JsonResponse({
+                    'success': True,
+                    'chat_history': [],
+                    'session_id': session_id,
+                    'total_messages': 0,
+                    'message': 'No active chat session'
+                })
+                
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': str(e)
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Only GET requests allowed'
+    })
+
+@csrf_exempt
+def search_chat_history_view(request):
+    """API endpoint to search through chat history"""
+    global chat_system
+    
+    if request.method == 'POST':
+        try:
+            query = request.POST.get('query', '').strip()
+            k = int(request.POST.get('k', 5))
+            session_id = get_or_create_session_id(request)
+            
+            if not query:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Query parameter is required'
+                })
+            
+            if chat_system and hasattr(chat_system, 'search_history'):
+                results = chat_system.search_history(query, k)
+                return JsonResponse({
+                    'success': True,
+                    'search_results': results,
+                    'query': query,
+                    'session_id': session_id,
+                    'results_count': len(results)
+                })
+            else:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'No active chat session to search'
+                })
+                
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': str(e)
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Only POST requests allowed'
+    })
+
+@csrf_exempt
+def clear_chat_history_view(request):
+    """API endpoint to clear chat history for current session"""
+    global chat_system
+    
+    if request.method == 'POST':
+        try:
+            session_id = get_or_create_session_id(request)
+            
+            if chat_system and hasattr(chat_system, 'clear_history'):
+                chat_system.clear_history()
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Chat history cleared successfully',
+                    'session_id': session_id
+                })
+            else:
+                return JsonResponse({
+                    'success': True,
+                    'message': 'No active chat session to clear',
+                    'session_id': session_id
+                })
+                
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': str(e)
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Only POST requests allowed'
+    })
+
 @csrf_exempt
 def validate_url_view(request):
     """Enhanced chatbot view that handles URL processing, tools, RAG, and default chat"""
-    global chat_system, messages, current_vectorstore_url
+    global chat_system, messages, current_vectorstore_url,current_session_id
     
     if request.method == 'POST':
         try:
             usermessage = request.POST.get('message', '').strip()
             
+            # Get or create session ID
+            session_id = get_or_create_session_id(request)
+
+            print('session_id',session_id)
+
+            # If session changed, update chat system
+            if current_session_id != session_id:
+                current_session_id = session_id
+                if chat_system and hasattr(chat_system, 'session_id'):
+                    # Create new chat system with new session
+                    if current_vectorstore_url and chat_system.vectorizer:
+                        chat_system = EnhancedWebContentChatWithHistory(
+                            vectorizer=chat_system.vectorizer,
+                            session_id=session_id
+                        )
+
             # Add user message to conversation history
             messages.append({"role": "user", "content": usermessage})
 
@@ -240,21 +387,29 @@ def validate_url_view(request):
                         
                         if summary["successful_urls"]:
                             # Create new chat system with this vectorstore
-                            chat_system = EnhancedWebContentChat(vectorizer)
+                            chat_system = EnhancedWebContentChatWithHistory(
+                                vectorizer=vectorizer,
+                                session_id=session_id
+                            )
                             current_vectorstore_url = extracted_url
                             
                             # Provide initial analysis of the URL
                             url_info = f"✅ Successfully processed and analyzed: {extracted_url}\n\n"
                             url_info += f"📊 Processing Summary:\n"
                             url_info += f"- Documents created: {summary.get('total_documents_created', 0)}\n"
+                            url_info += f"- Session ID: {session_id}\n\n"
                             url_info += f"- Content analyzed: ✓\n\n"
                             url_info += "🤖 I'm now ready to answer questions about this website's content. What would you like to know?"
-                            
+
+                            # Save this initial interaction
+                            chat_system.memory_manager.save_message_pair(usermessage, url_info)
+
                             messages.append({"role": "assistant", "content": url_info})
                             
                             return JsonResponse({
                                 'success': True,
                                 'response': url_info,
+                                'session_id': session_id,
                                 'response_meta': {
                                     'source': 'url_processing',
                                     'url_processed': extracted_url,
@@ -269,6 +424,7 @@ def validate_url_view(request):
                             return JsonResponse({
                                 'success': False,
                                 'response': error_msg,
+                                'session_id': session_id,
                                 'response_meta': {
                                     'source': 'error',
                                     'error_type': 'url_processing_failed',
@@ -283,6 +439,7 @@ def validate_url_view(request):
                         return JsonResponse({
                             'success': False,
                             'response': error_msg,
+                            'session_id': session_id,
                             'response_meta': {
                                 'source': 'error',
                                 'error_type': 'url_processing_exception',
@@ -305,10 +462,14 @@ def validate_url_view(request):
                         "sources": tool_response.get("sources", "")
                     }
                     messages.append(assistant_message)
-                    
+                    # Save this initial interaction
+
+
+                    chat_system.memory_manager.save_message_pair(usermessage, tool_response["answer"])
                     return JsonResponse({
                         'success': True,
                         'response': tool_response["answer"],
+                        'session_id': session_id,
                         'response_meta': {
                             'source': 'tool_agent',
                             'tool_used': tool_response['tool_used'],
@@ -317,33 +478,6 @@ def validate_url_view(request):
                         }
                     })
                 
-                # Use RAG system if no tool was used
-                print("Using RAG system...")
-                
-                if hasattr(chat_system.memory_manager.memory, 'output_key'):
-                    chat_system.memory_manager.memory.output_key = "answer"
-                
-                rag_response = chat_system.get_response(usermessage)
-                
-                if rag_response['success']:
-                    assistant_message = {
-                        "role": "assistant", 
-                        "content": rag_response["answer"],
-                        "sources": rag_response.get("source_documents", "")
-                    }
-                    messages.append(assistant_message)
-
-                    return JsonResponse({
-                        'success': True,
-                        'response': rag_response["answer"],
-                        'response_meta': {
-                            'source': 'rag_chain',
-                            'source_documents': len(rag_response.get("source_documents", [])),
-                            'url_processed': current_vectorstore_url,
-                            'response_type': 'rag_response'
-                        }
-                    })
-
             # Step 4: If no vectorstore and not URL-related, use default chat
             print("Using default chat mode...")
             
@@ -353,11 +487,16 @@ def validate_url_view(request):
                 "role": "assistant", 
                 "content": default_response
             }
+            # Save this initial interaction
+            #chat_system.memory_manager.save_message_pair(usermessage, default_response)
+            if chat_system and hasattr(chat_system, 'memory_manager') and chat_system.memory_manager:
+                chat_system.memory_manager.save_message_pair(usermessage, default_response)
             messages.append(assistant_message)
             
             return JsonResponse({
                 'success': True,
                 'response': default_response,
+                'session_id': session_id,
                 'response_meta': {
                     'source': 'default_chat',
                     'response_type': 'general_conversation',
@@ -369,6 +508,7 @@ def validate_url_view(request):
             return JsonResponse({
                 'success': False,
                 'response': 'Invalid JSON data provided.',
+                'session_id': session_id,
                 'response_meta': {
                     'source': 'error',
                     'error_type': 'json_decode_error'
@@ -401,36 +541,224 @@ def validate_url_view(request):
 
 # ------------------- Enhanced Classes (Keep existing classes unchanged) -------------------
 
-class ChatMemoryManager:
+class PersistentChatHistoryManager:
     """Manages chat history and memory for conversational interactions"""
     
-    def __init__(self, vectorstore, window_token_limit: int = 1000):
-        retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 20}
-        )
+    def __init__(self, session_id: str, vectorstore=None, window_token_limit: int = 1000):
+
+        self.session_id = session_id
+        self.window_token_limit = window_token_limit
+
+        # Initialize embeddings for chat history
+        self.embeddings = OpenAIEmbeddings(openai_api_key=OPENAIKEY, model="text-embedding-3-small")
         
-        self.memory = ConversationVectorStoreTokenBufferMemory(
-            retriever=retriever,
-            memory_key="chat_history",
-            return_messages=True,
-            output_key="answer",  # Default to "answer"
-            llm=ChatOpenAI(temperature=0, openai_api_key=OPENAIKEY),
-            max_token_limit=window_token_limit,
+        # Create separate Chroma DB for chat history
+        self.chat_history_db = Chroma(
+            collection_name=f"chat_history_{session_id}",
+            embedding_function=self.embeddings,
+            persist_directory="./chroma_db_chat_history"
         )
-        self.llm = self.memory.llm
+
+        # Initialize LLM
+        self.llm = ChatOpenAI(temperature=0, openai_api_key=OPENAIKEY)
+
         
-    def get_chat_history(self) -> List[Dict[str, str]]:
-        """Get formatted chat history for display"""
-        history = []
-        if hasattr(self.memory, 'chat_memory'):
-            for message in self.memory.chat_memory.messages:
-                if isinstance(message, HumanMessage):
-                    history.append({"role": "human", "content": message.content})
-                elif isinstance(message, AIMessage):
-                    history.append({"role": "ai", "content": message.content})
-        return history
+        # Initialize traditional memory for immediate context
+        if vectorstore:
+            retriever = vectorstore.as_retriever(
+                search_type="mmr",
+                search_kwargs={"k": 5, "fetch_k": 20}
+            )
+            self.memory = ConversationVectorStoreTokenBufferMemory(
+                retriever=retriever,
+                memory_key="chat_history",
+                return_messages=True,
+                output_key="answer",
+                llm=self.llm,
+                max_token_limit=window_token_limit,
+            )
+        else:
+            self.memory = None
+
+        # Load existing chat history from Chroma DB
+        self._load_chat_history()
     
+    def get_memory_messages(self) -> List[BaseMessage]:
+        """Get memory messages for context in chains"""
+        if self.memory and hasattr(self.memory, 'chat_memory'):
+            return self.memory.chat_memory.messages
+        return []
+
+    def _generate_message_id(self) -> str:
+        """Generate unique message ID"""
+        timestamp = datetime.now().isoformat()
+        return hashlib.md5(f"{self.session_id}_{timestamp}".encode()).hexdigest()
+
+    def _load_chat_history(self):
+        """Load existing chat history from Chroma DB into memory"""
+        try:
+            # Get all messages for this session, ordered by timestamp
+            collection = self.chat_history_db.get()
+            if collection['ids']:
+                # Sort by timestamp metadata
+                messages_with_time = []
+                for i, doc_id in enumerate(collection['ids']):
+                    metadata = collection['metadatas'][i]
+                    content = collection['documents'][i]
+                    messages_with_time.append((metadata['timestamp'], content, metadata))
+                
+                # Sort by timestamp
+                messages_with_time.sort(key=lambda x: x[0])
+                
+                # Rebuild memory from sorted messages
+                if self.memory:
+                    for timestamp, content, metadata in messages_with_time:
+                        if metadata['message_type'] == 'human_ai_pair':
+                            # Parse the human-AI pair
+                            parts = content.split("AI: ", 1)
+                            if len(parts) == 2:
+                                human_part = parts[0].replace("Human: ", "").strip()
+                                ai_part = parts[1].strip()
+                                
+                                # Add to memory
+                                self.memory.save_context(
+                                    {"input": human_part},
+                                    {"answer": ai_part}
+                                )
+                
+                print(f"Loaded {len(messages_with_time)} messages from chat history")
+                
+        except Exception as e:
+            print(f"Error loading chat history: {e}")
+
+    def save_message_pair(self, human_input: str, ai_response: str) -> str:
+        """Save a human-AI conversation pair to Chroma DB"""
+        try:
+            # Create combined document for the conversation pair
+            message_content = f"Human: {human_input}\nAI: {ai_response}"
+            message_id = self._generate_message_id()
+            
+            # Metadata for the message
+            metadata = {
+                'session_id': self.session_id,
+                'message_id': message_id,
+                'timestamp': datetime.now().isoformat(),
+                'message_type': 'human_ai_pair',
+                'human_input': human_input[:500],  # Truncate for metadata
+                'ai_response': ai_response[:500],   # Truncate for metadata
+                'content_length': len(message_content)
+            }
+            
+            # Create document
+            document = Document(
+                page_content=message_content,
+                metadata=metadata
+            )
+            
+            # Add to Chroma DB
+            self.chat_history_db.add_documents([document])
+            
+            # Also save to traditional memory if available
+            if self.memory:
+                self.memory.save_context(
+                    {"input": human_input},
+                    {"answer": ai_response}
+                )
+            
+            print(f"Saved message pair to chat history: {message_id}")
+            return message_id
+            
+        except Exception as e:
+            print(f"Error saving message pair: {e}")
+            return None
+
+    def get_chat_history(self, limit: int = 50) -> List[Dict[str, str]]:
+        """Get formatted chat history for display"""
+        try:
+            # Get recent messages from Chroma DB
+            collection = self.chat_history_db.get()
+            if not collection['ids']:
+                return []
+            
+            # Sort by timestamp and get recent messages
+            messages_with_time = []
+            for i, doc_id in enumerate(collection['ids']):
+                metadata = collection['metadatas'][i]
+                content = collection['documents'][i]
+                messages_with_time.append((metadata['timestamp'], content, metadata))
+            
+            # Sort by timestamp (newest first) and limit
+            messages_with_time.sort(key=lambda x: x[0], reverse=True)
+            recent_messages = messages_with_time[:limit]
+            
+            # Format for display
+            formatted_history = []
+            for timestamp, content, metadata in reversed(recent_messages):  # Reverse to show oldest first
+                if metadata['message_type'] == 'human_ai_pair':
+                    parts = content.split("AI: ", 1)
+                    if len(parts) == 2:
+                        human_part = parts[0].replace("Human: ", "").strip()
+                        ai_part = parts[1].strip()
+                        
+                        formatted_history.append({
+                            "role": "human",
+                            "content": human_part,
+                            "timestamp": timestamp
+                        })
+                        formatted_history.append({
+                            "role": "ai", 
+                            "content": ai_part,
+                            "timestamp": timestamp
+                        })
+            
+            return formatted_history
+            
+        except Exception as e:
+            print(f"Error getting chat history: {e}")
+            return []
+    
+    def search_chat_history(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Search through chat history using vector similarity"""
+        try:
+            results = self.chat_history_db.similarity_search(query, k=k)
+            
+            formatted_results = []
+            for doc in results:
+                formatted_results.append({
+                    'content': doc.page_content,
+                    'metadata': doc.metadata,
+                    'timestamp': doc.metadata.get('timestamp'),
+                    'message_id': doc.metadata.get('message_id')
+                })
+            
+            return formatted_results
+            
+        except Exception as e:
+            print(f"Error searching chat history: {e}")
+            return []
+
+    def clear_chat_history(self):
+        """Clear chat history for current session"""
+        try:
+            # Clear Chroma DB collection
+            self.chat_history_db.delete_collection()
+            
+            # Recreate collection
+            self.chat_history_db = Chroma(
+                collection_name=f"chat_history_{self.session_id}",
+                embedding_function=self.embeddings,
+                persist_directory="./chroma_db_chat_history"
+            )
+            
+            # Clear traditional memory
+            if self.memory:
+                self.memory.clear()
+            
+            print(f"Cleared chat history for session: {self.session_id}")
+            
+        except Exception as e:
+            print(f"Error clearing chat history: {e}")
+
     def add_message(self, human_input: str, ai_response: str):
         """Add a conversation pair to memory"""
         try:
@@ -446,14 +774,23 @@ class ChatMemoryManager:
         self.memory.clear()
 
 
-class EnhancedWebContentChat:
+class EnhancedWebContentChatWithHistory:
     """Enhanced web content chat with memory and context awareness"""
     
-    def __init__(self, vectorizer: MultiURLVectorizer = None):
+    def __init__(self, vectorizer: MultiURLVectorizer = None,session_id: str = None):
         self.vectorizer = vectorizer
+        self.session_id = session_id or str(uuid.uuid4())
         self.memory_manager = None
-        if vectorizer and vectorizer.vectorstore:
-            self.memory_manager = ChatMemoryManager(vectorstore=vectorizer.vectorstore)
+
+        # Initialize persistent history manager
+        self.memory_manager = PersistentChatHistoryManager(
+            session_id=self.session_id,
+            vectorstore=vectorizer.vectorstore if vectorizer else None
+        )
+
+
+        # if vectorizer and vectorizer.vectorstore:
+        #     self.memory_manager = ChatMemoryManager(vectorstore=vectorizer.vectorstore)
         
         self.system_prompt = f"""You are an expert SEO assistant and web content analyzer. You answer questions based on web content that has been processed and stored in a vector database.
 
@@ -478,6 +815,7 @@ Instructions:
 - Always aim to be constructive and solution-oriented
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Session ID: {self.session_id}
 """
 
         self.contextualize_q_system_prompt = """Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is."""
@@ -499,8 +837,8 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if not self.vectorizer or not self.vectorizer.vectorstore:
             raise ValueError("Vector store not available. Process URLs first.")
         
-        if not self.memory_manager:
-            self.memory_manager = ChatMemoryManager(vectorstore=self.vectorizer.vectorstore)
+        # if not self.memory_manager:
+        #     self.memory_manager = ChatMemoryManager(vectorstore=self.vectorizer.vectorstore)
         
         retriever = self.vectorizer.vectorstore.as_retriever(
             search_type="mmr",
@@ -589,6 +927,8 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             formatted_input = {"input": user_input} if isinstance(user_input, str) else user_input
                 
             result = self.tool_agent.invoke(formatted_input)
+
+            print('result',result)
             
             # Extract response text
             if isinstance(result, dict):
@@ -630,6 +970,18 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 "tool_used": "unknown",
                 "metadata": {"error_type": type(e).__name__}
             }
+    
+    def get_chat_history(self, limit: int = 50) -> List[Dict[str, str]]:
+        """Get chat history for this session"""
+        return self.memory_manager.get_chat_history(limit)
+
+    def search_history(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Search through chat history"""
+        return self.memory_manager.search_chat_history(query, k)
+
+    def clear_history(self):
+        """Clear chat history for current session"""
+        self.memory_manager.clear_chat_history()
 
     def _extract_sources_from_response(self, response_text: str) -> str:
         """Extract source URLs or references from response text"""
@@ -668,9 +1020,11 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 self.setup_retrieval_chain()
             
             # Get chat history for context
-            chat_history = []
-            if self.memory_manager and hasattr(self.memory_manager.memory, 'chat_memory'):
-                chat_history = self.memory_manager.memory.chat_memory.messages
+
+            chat_history = self.memory_manager.get_memory_messages()
+            # chat_history = []
+            # if self.memory_manager and hasattr(self.memory_manager.memory, 'chat_memory'):
+            #     chat_history = self.memory_manager.memory.chat_memory.messages
             
             # Invoke the RAG chain
             response = self.rag_chain.invoke({
@@ -678,6 +1032,9 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 "chat_history": chat_history
             })
             
+            # Save conversation to persistent storage
+            message_id = self.memory_manager.save_message_pair(user_input, response["answer"])
+
             # Save to memory
             if self.memory_manager:
                 self.memory_manager.add_message(user_input, response["answer"])
@@ -686,9 +1043,11 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 "answer": response["answer"],
                 "source_documents": response.get("context", []),
                 "success": True,
+                "session_id": self.session_id,
+                "message_id": message_id,
                 "metadata": {
                     "context_docs_used": len(response.get("context", [])),
-                    "response_type": "rag_with_memory"
+                    "response_type": "rag_with_persistent_history"
                 }
             }
             
@@ -699,6 +1058,7 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             # Still try to save error to memory
             if self.memory_manager:
                 try:
+                    self.memory_manager.save_message_pair(user_input, error_message)
                     self.memory_manager.add_message(user_input, error_message)
                 except:
                     pass
@@ -708,5 +1068,7 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 "source_documents": [],
                 "success": False,
                 "error": str(e),
+                "session_id": self.session_id,
                 "metadata": {"error_type": type(e).__name__}
             }
+        
