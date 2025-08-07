@@ -340,9 +340,12 @@ def validate_url_view(request):
     if request.method == 'POST':
         try:
             usermessage = request.POST.get('message', '').strip()
-            
+           
             # Get or create session ID
             session_id = get_or_create_session_id(request)
+
+            timestamp = datetime.now().isoformat()
+            message_id =  hashlib.md5(f"{session_id}_{timestamp}".encode()).hexdigest()
 
             print('session_id',session_id)
 
