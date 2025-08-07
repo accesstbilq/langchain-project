@@ -1,66 +1,282 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        {% load static %}
-        <meta charset="UTF-8">
-        <title>Chat with Bot</title>
-        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-        <link rel="stylesheet" href="{% static 'css/styles.css' %}">
-    </head>
-    <body>
-        <div class="" style="display: flex;gap: 10px;">
-            <div class="metadata-comtainer" id="metadata_comtainer" style="padding: 0px;background-color: #ffffff;border-radius: 10px;    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);display: flex;flex-direction: column;overflow: hidden;">
-                <div class="chat-header">
-                    MetaData
-                </div>
-                <div class="metadata" style="padding: 10px 20px;"></div>
+<head>
+    {% load static %}
+    <meta charset="UTF-8">
+    <title>Chat with Bot</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+</head>
+<body>
+    <div class="main-container">
+        <!-- Sidebar for History Management -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                Chat History Management
             </div>
-            <div class="chat-container">
-                <div class="chat-header">
-                    Chat with Bot
+            <div class="sidebar-content">
+                <!-- History Controls -->
+                <div class="history-controls">
+                    <button class="history-button primary" onclick="loadChatHistory()">
+                        📜 Load Chat History
+                    </button>
+                    <button class="history-button danger" onclick="clearChatHistory()">
+                        🗑️ Clear History
+                    </button>
                 </div>
-                <div class="chat-box" id="chat-box"></div>
-                <!-- Loader shown while waiting for bot -->
-                <div id="loader" class="loader"></div>
-                <div class="chat-input">
-                    <input type="text" id="user-input" placeholder="Type a message..." onkeydown="if(event.key === 'Enter') sendMessage()">
-                    <button onclick="sendMessage()">Send</button>
+
+                <!-- Search Container -->
+                <div class="search-container">
+                    <input type="text" class="search-input" id="search-query" 
+                           placeholder="Search chat history..." 
+                           onkeydown="if(event.key === 'Enter') searchHistory()">
+                    <button class="history-button secondary" onclick="searchHistory()">
+                        🔍 Search History
+                    </button>
+                </div>
+
+                <!-- Status Messages -->
+                <div id="status-messages"></div>
+
+                <!-- Search Results -->
+                <div id="search-results" style="display: none;"></div>
+
+                <!-- History List -->
+                <div id="history-container" style="display: none;">
+                    <h4 style="margin-bottom: 10px; color: #495057;">Recent Messages:</h4>
+                    <div class="history-list" id="history-list"></div>
                 </div>
             </div>
-            
         </div>
-        <script>
-            function sendMessage() {
-                const userInput = $('#user-input').val().trim();
-                //if (!userInput) return;
 
-                $('#chat-box').append('<div class="message user">You: ' + userInput + '</div>');
-                $('#user-input').val('');
-                $('#loader').show();
+        <!-- Chat Container -->
+        <div class="chat-container">
+            <div class="chat-header">
+                Chat with Bot
+            </div>
+            <div class="chat-box" id="chat-box"></div>
+            <div id="loader" class="loader"></div>
+            <div class="chat-input">
+                <input type="text" id="user-input" 
+                       placeholder="Type a message..." 
+                       onkeydown="if(event.key === 'Enter') sendMessage()">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
 
-                $.post('/get-response/', { message: userInput }, function(data) {
-                    let originalText = data.response;
-                    let formattedText = originalText.replace(/\n/g, "<br/>");
-                    $('#chat-box').append('<div class="message bot">Bot: ' + formattedText + '</div>');
-                    
-                    
-                                       
-                    if(data.response_meta.source=='tool_agent'){
-                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Tool Used: '+data.response_meta.tool_used+'</p><p>Message ID: '+data.message_id+'</p><p>Session ID: '+data.session_id+'</p>');
-                    }else{
-                        $('.metadata').html('<p>Response Type: '+data.response_meta.response_type+'</p><p>source: '+data.response_meta.source+'</p><p>Message ID: '+data.message_id+'</p><p>Session ID: '+data.session_id+'</p>');
-                    }
+        <!-- Metadata Container -->
+        <div class="metadata-container">
+            <div class="metadata-header">
+                Response Metadata
+            </div>
+            <div class="metadata" id="metadata-display">
+                <p style="color: #6c757d; font-style: italic;">Metadata will appear here after sending a message</p>
+            </div>
+        </div>
+    </div>
 
-                    
+    <script>
+        // Global variables
+        let currentSessionId = null;
 
+        // Main chat functionality
+        function sendMessage() {
+            const userInput = $('#user-input').val().trim();
+            if (!userInput) return;
 
-                }).fail(function(jqXHR, textStatus, errorThrown) {
-                    $('#chat-box').append('<div class="message bot">❌ Error: ' + errorThrown + '</div>');
-                }).always(function() {
-                    $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
-                    $('#loader').hide();
-                });
+            $('#chat-box').append('<div class="message user">' + userInput + '</div>');
+            $('#user-input').val('');
+            $('#loader').show();
+
+            $.post('/get-response/', { message: userInput }, function(data) {
+                let originalText = data.response;
+                let formattedText = originalText.replace(/\n/g, "<br/>");
+                $('#chat-box').append('<div class="message bot">' + formattedText + '</div>');
+                
+                // Update session ID
+                currentSessionId = data.session_id;
+                
+                // Update metadata display
+                updateMetadataDisplay(data);
+
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                $('#chat-box').append('<div class="message bot">❌ Error: ' + errorThrown + '</div>');
+            }).always(function() {
+                $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                $('#loader').hide();
+            });
+        }
+
+        // Update metadata display
+        function updateMetadataDisplay(data) {
+            let metadataHtml = '';
+            
+            if (data.response_meta) {
+                metadataHtml += '<p><strong>Response Type:</strong> ' + (data.response_meta.response_type || 'N/A') + '</p>';
+                metadataHtml += '<p><strong>Source:</strong> ' + (data.response_meta.source || 'N/A') + '</p>';
+                
+                if (data.response_meta.tool_used) {
+                    metadataHtml += '<p><strong>Tool Used:</strong> ' + data.response_meta.tool_used + '</p>';
+                }
+                
+                if (data.message_id) {
+                    metadataHtml += '<p><strong>Message ID:</strong> ' + data.message_id + '</p>';
+                }
+                
+                if (data.session_id) {
+                    metadataHtml += '<p><strong>Session ID:</strong> ' + data.session_id + '</p>';
+                }
+                
+                if (data.response_meta.url_processed) {
+                    metadataHtml += '<p><strong>URL Processed:</strong> <a href="' + data.response_meta.url_processed + '" target="_blank">' + data.response_meta.url_processed + '</a></p>';
+                }
             }
-        </script>
-    </body>
+            
+            $('#metadata-display').html(metadataHtml);
+        }
+
+        // Load chat history
+        function loadChatHistory() {
+            showStatusMessage('Loading chat history...', 'info');
+            
+            $.get('/chat-history/', { limit: 50 }, function(data) {
+                if (data.success) {
+                    displayChatHistory(data.chat_history);
+                    showStatusMessage(`Loaded ${data.total_messages} messages`, 'success');
+                    currentSessionId = data.session_id;
+                } else {
+                    showStatusMessage('Failed to load chat history: ' + data.error, 'error');
+                }
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                showStatusMessage('Error loading chat history: ' + errorThrown, 'error');
+            });
+        }
+
+        // Display chat history
+        function displayChatHistory(history) {
+            const historyContainer = $('#history-container');
+            const historyList = $('#history-list');
+            
+            if (!history || history.length === 0) {
+                historyList.html('<div class="no-results">No chat history found</div>');
+            } else {
+                let historyHtml = '';
+                history.forEach(function(item) {
+                    const roleClass = item.role === 'human' ? 'human' : 'ai';
+                    const roleLabel = item.role === 'human' ? '👤 You' : '🤖 Bot';
+                    const timestamp = new Date(item.timestamp).toLocaleString();
+                    let originalText = item.content;
+                    let formattedText = originalText.replace(/\n/g, "<br/>");
+                    historyHtml += '<div class="history-item ' + roleClass + '">';
+                    historyHtml += '<strong>' + roleLabel + ':</strong> ' + formattedText;
+                    historyHtml += '<div class="history-item-meta">' + timestamp + '</div>';
+                    historyHtml += '</div>';
+                });
+                historyList.html(historyHtml);
+            }
+            
+            historyContainer.show();
+            $('#search-results').hide();
+        }
+
+        // Search chat history
+        function searchHistory() {
+            const query = $('#search-query').val().trim();
+            if (!query) {
+                showStatusMessage('Please enter a search query', 'error');
+                return;
+            }
+
+            showStatusMessage('Searching chat history...', 'info');
+
+            $.post('/search-history/', { 
+                query: query, 
+                k: 10 
+            }, function(data) {
+                if (data.success) {
+                    displaySearchResults(data.search_results, query);
+                    showStatusMessage(`Found ${data.results_count} results for "${query}"`, 'success');
+                } else {
+                    showStatusMessage('Search failed: ' + data.error, 'error');
+                }
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                showStatusMessage('Error searching history: ' + errorThrown, 'error');
+            });
+        }
+
+        // Display search results
+        function displaySearchResults(results, query) {
+            const searchResultsContainer = $('#search-results');
+            
+            if (!results || results.length === 0) {
+                searchResultsContainer.html('<div class="no-results">No results found for "' + query + '"</div>');
+            } else {
+                let resultsHtml = '<h4 style="margin-bottom: 10px; color: #495057;">Search Results for "' + query + '":</h4>';
+                
+                results.forEach(function(result) {
+                    const timestamp = result.metadata && result.metadata.timestamp ? 
+                        new Date(result.metadata.timestamp).toLocaleString() : 'Unknown time';
+                    
+                    resultsHtml += '<div class="search-result-item">';
+                    resultsHtml += '<div>' + result.content + '</div>';
+                    resultsHtml += '<div class="history-item-meta">Message ID: ' + (result.metadata.message_id || 'N/A') + ' | ' + timestamp + '</div>';
+                    resultsHtml += '</div>';
+                });
+                
+                searchResultsContainer.html(resultsHtml);
+            }
+            
+            searchResultsContainer.show();
+            $('#history-container').hide();
+        }
+
+        // Clear chat history
+        function clearChatHistory() {
+            if (!confirm('Are you sure you want to clear all chat history? This action cannot be undone.')) {
+                return;
+            }
+
+            showStatusMessage('Clearing chat history...', 'info');
+
+            $.post('/clear-history/', {}, function(data) {
+                if (data.success) {
+                    showStatusMessage('Chat history cleared successfully', 'success');
+                    $('#history-container').hide();
+                    $('#search-results').hide();
+                    $('#search-query').val('');
+                    
+                    // Also clear the current chat display
+                    $('#chat-box').empty();
+                    $('#metadata-display').html('<p style="color: #6c757d; font-style: italic;">Metadata will appear here after sending a message</p>');
+                } else {
+                    showStatusMessage('Failed to clear history: ' + data.error, 'error');
+                }
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                showStatusMessage('Error clearing history: ' + errorThrown, 'error');
+            });
+        }
+
+        // Show status messages
+        function showStatusMessage(message, type) {
+            const statusContainer = $('#status-messages');
+            const messageClass = type === 'success' ? 'success' : (type === 'error' ? 'error' : 'info');
+            
+            const messageHtml = '<div class="status-message ' + messageClass + '">' + message + '</div>';
+            statusContainer.html(messageHtml);
+            
+            // Auto-hide after 5 seconds
+            setTimeout(function() {
+                statusContainer.fadeOut(300, function() {
+                    statusContainer.empty().show();
+                });
+            }, 5000);
+        }
+
+        // Initialize page
+        $(document).ready(function() {
+            // Auto-load chat history on page load
+            loadChatHistory();
+        });
+    </script>
+</body>
 </html>

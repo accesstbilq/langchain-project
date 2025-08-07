@@ -24,7 +24,7 @@ import uuid
 import hashlib
 
 # Chroma DB imports for chat history
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_openai.embeddings import OpenAIEmbeddings
 from langchain.schema import Document
 
@@ -217,6 +217,7 @@ def get_or_create_session_id(request):
 def chatbot_view(request):
     return render(request, 'chatbot/chat.html')
 
+
 @csrf_exempt 
 def get_chat_history_view(request):
     """API endpoint to get chat history for current session"""
@@ -339,13 +340,11 @@ def validate_url_view(request):
     
     if request.method == 'POST':
         try:
+
             usermessage = request.POST.get('message', '').strip()
-           
+
             # Get or create session ID
             session_id = get_or_create_session_id(request)
-
-            timestamp = datetime.now().isoformat()
-            message_id =  hashlib.md5(f"{session_id}_{timestamp}".encode()).hexdigest()
 
             print('session_id',session_id)
 
@@ -483,6 +482,21 @@ def validate_url_view(request):
                         }
                     })
                 
+            if chat_system is None:
+                try:
+                    # Create a minimal chat system without URL vectorstore
+                    # This assumes you have a way to create chat system without URLs
+                    chat_system = EnhancedWebContentChatWithHistory(
+                        vectorizer=None,  # No URL vectorizer
+                        session_id=session_id
+                    )
+                    current_vectorstore_url = None
+                    print("Created default chat system for session management")
+                except Exception as e:
+                    print(f"Could not create default chat system: {e}")
+                    # Use fallback approach
+                    pass
+            
             # Step 4: If no vectorstore and not URL-related, use default chat
             print("Using default chat mode...")
             
