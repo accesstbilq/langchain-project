@@ -1,8 +1,11 @@
 from django.urls import path
 from . import views
+from . import chatviews
 
 urlpatterns = [
     path('', views.chatbot_view, name='chat'),
+    path('chatbot/', chatviews.chatbot_view, name='chatbot'),
+    path('chat-input/', chatviews.chatbot_input, name='chatbot-input'),
     path('get-response/', views.validate_url_view, name='get_message'),
     # New chat history endpoints
     path('chat-history/', views.get_chat_history_view, name='get_chat_history'),
