@@ -5,9 +5,13 @@ import validators
 import requests, traceback
 import json
 import os
+from dotenv import load_dotenv
+
+from bs4 import BeautifulSoup
 
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
+from langchain.schema import SystemMessage, AIMessage, BaseMessage
+from langchain_core.messages import ToolMessage,HumanMessage
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
 
@@ -15,14 +19,12 @@ from langchain.tools import tool
 chat_system = ""
 messages = []
 
-# Get the OpenAI API key from environment variables
+# Load ENV file
+load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 
-
-#system_message = "You are a helpful assistant tasked with performing arithmetic on a set of inputs."
-
-system_message = """You are an expert SEO assistant that can use tools to help with search engine optimization tasks. 
-        
+system_message = """
+You are an expert SEO assistant. 
 Your expertise includes:
 - Keyword research and analysis
 - Content optimization strategies
@@ -33,61 +35,153 @@ Your expertise includes:
 - Search ranking analysis
 - Competitor analysis
 
-You should provide actionable, data-driven SEO advice and use available tools when they can help gather information or perform specific SEO-related tasks. Always explain your recommendations clearly and provide practical implementation steps."""
-        
-
-
+Guidelines:
+1. Only answer SEO-related questions in detail.
+2. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
+3. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
+4. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
+5. Always provide actionable, practical SEO recommendations with clear steps.
+"""
 
 @tool
-def multiply(a: int, b: int) -> int:
-        """Multiply a and b.
-        Args:
-        a: first int
-        b: second int
-        """
-        chat_system = " Tool call "
-        return a * b
+def multiply(a: float, b: float) -> float:
+    """Multiply two numbers.
+    Args:
+        a: first number
+        b: second number
+    Returns:
+        The product of a and b
+    """
+    global chat_system
+    chat_system = "Tool call - Multiply"
+    return a * b
+
+@tool
+def validate_and_fetch_url(url: str) -> str:
+    """Validate a URL and fetch its title if valid.
+    Args:
+        url: The URL to validate and fetch title from
+    Returns:
+        Validation result and title if successful
+    """
+    global chat_system
+    chat_system = "Tool call - URL Validation"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = soup.title.string.strip() if soup.title and soup.title.string else "No title found"
+        
+        return f"✅ URL is valid.\nTitle: {title}"
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ URL validation passed, but content fetch failed.\nError: {str(e)}"
 
 def chatbot_view(request):
     return render(request, 'chatbot.html')
 
 @csrf_exempt
 def chatbot_input(request):
-    """Enhanced chatbot view """        
+    """SEO-focused chatbot with arithmetic tool support"""
+    global chat_system
+
+    if not hasattr(request, 'POST') or request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
+
     usermessage = request.POST.get('message', '').strip()
-    # Add user message to conversation history
-    #messages.append({"role": "user", "content": usermessage})
+    if not usermessage:
+        return JsonResponse({'success': False, 'error': 'No message provided'})
 
     try:
-        tools = [multiply]
-        llm = ChatOpenAI(temperature=0.7, openai_api_key=OPENAIKEY, model="gpt-3.5-turbo")
-        #llm_with_tools = llm.bind_tools(tools,tools_choice="any")
+        # SEO + arithmetic tool
+        tools = [multiply, validate_and_fetch_url]
+
+        llm = ChatOpenAI(
+            temperature=0.7,
+            openai_api_key=OPENAIKEY,
+            model="gpt-3.5-turbo"
+        )
         llm_with_tools = llm.bind_tools(tools)
-        # Create a simple conversation
+        chat_system = "LLM Call"
+        # Initial messages
+        messages = [
+            SystemMessage(content=system_message),
+            HumanMessage(content=usermessage)
+        ]
+
+        # Get initial AI response
+        ai_msg = llm_with_tools.invoke(messages)
+        messages.append(ai_msg)
         
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", "{input}")
-        ])
-        
-        chain = prompt | llm_with_tools
-        chat_system = " LLM Call "
-        default_response = chain.invoke({"input": usermessage})
-        print (default_response)
+        print(f"AI Response: {ai_msg}")
+        print(f"Tool calls: {ai_msg.tool_calls}")
+
+        # Process tool calls if any
+        if ai_msg.tool_calls:
+            tool_mapping = {
+                "multiply": multiply,
+                "validate_and_fetch_url": validate_and_fetch_url
+            }
+
+            for tool_call in ai_msg.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_call_id = tool_call["id"]
+                
+                print(f"Processing tool call: {tool_name} with args: {tool_args}")
+                
+                if tool_name in tool_mapping:
+                    selected_tool = tool_mapping[tool_name]
+                    try:
+                        # Run the tool with args
+                        tool_result = selected_tool.invoke(tool_args)
+                        print(f"Tool result: {tool_result}")
+                        
+                        # Append ToolMessage with matching tool_call_id
+                        messages.append(
+                            ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
+                        )
+                    except Exception as e:
+                        print(f"Error running tool {tool_name}: {str(e)}")
+                        messages.append(
+                            ToolMessage(content=f"❌ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
+                        )
+                else:
+                    messages.append(
+                        ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
+                    )
+            
+            # Get final response after tool execution
+            final_response = llm_with_tools.invoke(messages)
+            print(f"Final response: {final_response}")
+        else:
+            # No tools called, use initial response
+            final_response = ai_msg
+
         return JsonResponse({
-                'success': True,
-                'response': default_response.content,
-                'session_id': "12345",
-                'message_id': "12345",
-                'response_meta': {
-                    'source': chat_system,
-                    'response_type': 'general_conversation',
-                    'has_vectorstore': chat_system is not None
-                }
-            })
-        
+            'success': True,
+            'response': final_response.content,
+            'session_id': "12345",
+            'message_id': "12345",
+            'response_meta': {
+                'source': chat_system,
+                'response_type': 'Tool Usage' if ai_msg.tool_calls else 'General Conversation',
+                'has_vectorstore': False,
+                'tools_used': len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False,
+                'tool_calls_made': [tc["name"] for tc in ai_msg.tool_calls] if ai_msg.tool_calls else [],
+                'total_tokens': final_response.usage_metadata.get("total_tokens", 0),
+                'input_tokens': final_response.usage_metadata.get("input_tokens", 0),
+                'output_tokens': final_response.usage_metadata.get("output_tokens", 0)
+            }
+        })
+
     except Exception as e:
-        print(f"Error in default chat: {e}")
-        return "I'm sorry, I encountered an error processing your request. Please try again."
-    
-   
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': f'Processing error: {str(e)}'
+        })
