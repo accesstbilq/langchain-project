@@ -5,6 +5,7 @@ from . import chatviews
 urlpatterns = [
     path('', views.chatbot_view, name='chat'),
     path('chatbot/', chatviews.chatbot_view, name='chatbot'),
+    path('document/', chatviews.document_view, name='document'),
     path('chat-input/', chatviews.chatbot_input, name='chatbot-input'),
     path('get-response/', views.validate_url_view, name='get_message'),
     # New chat history endpoints

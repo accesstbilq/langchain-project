@@ -100,6 +100,9 @@ def validate_and_fetch_url(url: str) -> str:
 def chatbot_view(request):
     return render(request, 'chatbot.html')
 
+def document_view(request):
+    return render(request, 'document.html')
+
 @csrf_exempt
 def upload_documents(request):
     """Handle multiple document uploads"""
