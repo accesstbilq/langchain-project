@@ -1,11 +1,16 @@
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.core.files.storage import FileSystemStorage
+from django.conf import settings
 import validators
 import requests, traceback
 import json
 import os
 from dotenv import load_dotenv
+from datetime import datetime
+import mimetypes
+import uuid
 
 from bs4 import BeautifulSoup
 
@@ -23,8 +28,17 @@ messages = []
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 
+# Document storage configuration
+UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'documents')
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
+
+# In-memory document store (in production, use database)
+uploaded_documents = {}
+
+
 system_message = """
-You are an expert SEO assistant. 
+You are an expert SEO assistant with document analysis capabilities. 
 Your expertise includes:
 - Keyword research and analysis
 - Content optimization strategies
@@ -34,13 +48,15 @@ Your expertise includes:
 - SEO auditing and reporting
 - Search ranking analysis
 - Competitor analysis
+- Document content analysis for SEO insights
 
 Guidelines:
 1. Only answer SEO-related questions in detail.
 2. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
 3. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
 4. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
-5. Always provide actionable, practical SEO recommendations with clear steps.
+5. You can analyze uploaded documents for SEO-related insights when asked.
+6. Always provide actionable, practical SEO recommendations with clear steps.
 """
 
 @tool
@@ -85,6 +101,142 @@ def chatbot_view(request):
     return render(request, 'chatbot.html')
 
 @csrf_exempt
+def upload_documents(request):
+    """Handle multiple document uploads"""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'Only POST requests allowed'})
+    
+    if 'documents' not in request.FILES:
+        return JsonResponse({'success': False, 'error': 'No documents provided'})
+    
+    uploaded_files = []
+    errors = []
+    
+    # Allowed file types
+    ALLOWED_EXTENSIONS = {
+        'txt', 'pdf', 'doc', 'docx', 'html', 'css', 'js', 
+        'json', 'xml', 'csv', 'xlsx', 'ppt', 'pptx'
+    }
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    
+    files = request.FILES.getlist('documents')
+    
+    for file in files:
+        try:
+            # Validate file size
+            if file.size > MAX_FILE_SIZE:
+                errors.append(f"File '{file.name}' is too large (max 10MB)")
+                continue
+            
+            # Validate file extension
+            file_extension = file.name.split('.')[-1].lower()
+            if file_extension not in ALLOWED_EXTENSIONS:
+                errors.append(f"File type '{file_extension}' not allowed for '{file.name}'")
+                continue
+            
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())
+            file_name = f"{unique_id}_{file.name}"
+            
+            # Save file
+            fs = FileSystemStorage(location=UPLOAD_DIR)
+            filename = fs.save(file_name, file)
+            file_path = fs.path(filename)
+            
+            # Store document metadata
+            doc_info = {
+                'id': unique_id,
+                'original_name': file.name,
+                'file_name': filename,
+                'file_path': file_path,
+                'size': file.size,
+                'file_type': file_extension,
+                'mime_type': mimetypes.guess_type(file.name)[0] or 'application/octet-stream',
+                'upload_date': datetime.now().isoformat(),
+                'url': fs.url(filename) if hasattr(fs, 'url') else None
+            }
+            
+            uploaded_documents[unique_id] = doc_info
+            uploaded_files.append({
+                'id': unique_id,
+                'name': file.name,
+                'size': file.size,
+                'type': file_extension,
+                'upload_date': doc_info['upload_date']
+            })
+            
+        except Exception as e:
+            errors.append(f"Error uploading '{file.name}': {str(e)}")
+    
+    return JsonResponse({
+        'success': len(uploaded_files) > 0,
+        'uploaded_files': uploaded_files,
+        'errors': errors,
+        'total_uploaded': len(uploaded_files),
+        'total_errors': len(errors)
+    })
+
+@csrf_exempt
+def list_documents(request):
+    """Return list of uploaded documents"""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'error': 'Only GET requests allowed'})
+    
+    documents_list = []
+    for doc_id, doc_info in uploaded_documents.items():
+        documents_list.append({
+            'id': doc_id,
+            'name': doc_info['original_name'],
+            'size': doc_info['size'],
+            'type': doc_info['file_type'],
+            'upload_date': doc_info['upload_date'],
+            'mime_type': doc_info['mime_type']
+        })
+    
+    # Sort by upload date (newest first)
+    documents_list.sort(key=lambda x: x['upload_date'], reverse=True)
+    
+    return JsonResponse({
+        'success': True,
+        'documents': documents_list,
+        'total_count': len(documents_list)
+    })
+
+@csrf_exempt
+def delete_document(request):
+    """Delete an uploaded document"""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'Only POST requests allowed'})
+    
+    document_id = request.POST.get('document_id', '').strip()
+    if not document_id:
+        return JsonResponse({'success': False, 'error': 'Document ID required'})
+    
+    if document_id not in uploaded_documents:
+        return JsonResponse({'success': False, 'error': 'Document not found'})
+    
+    try:
+        doc_info = uploaded_documents[document_id]
+        
+        # Delete physical file
+        if os.path.exists(doc_info['file_path']):
+            os.remove(doc_info['file_path'])
+        
+        # Remove from memory store
+        del uploaded_documents[document_id]
+        
+        return JsonResponse({
+            'success': True,
+            'message': f"Document '{doc_info['original_name']}' deleted successfully"
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f"Error deleting document: {str(e)}"
+        })
+
+@csrf_exempt
 def chatbot_input(request):
     """SEO-focused chatbot with arithmetic tool support"""
     global chat_system
@@ -107,6 +259,7 @@ def chatbot_input(request):
         )
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
+                
         # Initial messages
         messages = [
             SystemMessage(content=system_message),
